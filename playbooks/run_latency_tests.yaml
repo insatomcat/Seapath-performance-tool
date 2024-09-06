@@ -1,0 +1,229 @@
+---
+- name: Prepare localhost
+  hosts:
+    localhost
+  tasks:
+    - name: Create tests results directory
+      file:
+        path: ../tests_results
+        state: directory
+    - name: Create tests results sub directory
+      file:
+        path: ../tests_results/{{ item }}
+        state: directory
+      with_items:
+        - pacing
+        - ptp
+        - latency
+        - data
+    - name: Record start time of the test
+      shell:
+        cmd: >-
+          echo Test started at $(echo `date +'%T'`) > ../tests_results/data/time
+
+- name: Launch bpftrace on hypervisors
+  become: true
+  hosts:
+    - hypervisors
+  vars_files:
+    - ../vars/threshold.yaml
+  tasks:
+      - name : Run bpftrace script
+        shell:
+          cmd: >-
+            taskset -c {{ bpftrace_core }} seapath-trace.py --record --conf /etc/seapath-trace.cfg --machine hypervisor
+        async: 9999999
+        poll: 0
+        when: enable_bpftrace is defined and enable_bpftrace|bool == true
+- name: Launch bpftrace on subscriber
+  become: true
+  hosts:
+    - subscriber
+  vars_files:
+    - ../vars/threshold.yaml
+  tasks:
+      - name : Run bpftrace script
+        shell:
+          cmd: >-
+            taskset -c {{ bpftrace_core }} seapath-trace.py --record --conf /etc/seapath-trace.cfg --machine VM
+        async: 9999999
+        poll: 0
+        when: enable_bpftrace is defined and enable_bpftrace|bool == true
+      - name: Make sure bpftrace has time to start
+        wait_for:
+          timeout: 5
+        when: enable_bpftrace is defined and enable_bpftrace|bool == true
+- name: Prepare publisher and receiver
+  become: true
+  hosts:
+    - publisher
+    - subscriber
+    - hypervisors
+  tasks:
+      - name : Run SV timestamp logger container
+        command:
+          docker run --privileged \
+          -d \
+          -v /tmp:/tmp \
+          --cpuset-cpus={{ sv_ts_core }} \
+          --name sv_timestamp_logger \
+          --network=host sv_timestamp_logger \
+          -d {{sv_interface}} \
+          -f /tmp/ts_sv_{{ inventory_hostname }} \
+          {% if 'stream_to_log' is defined %}
+          -s {{ stream_to_log }} \
+          {% endif %}
+          --first_SV_cnt \ {{first_SV}} \
+          {% if 'hypervisors' in group_names %}
+          -t
+          {% endif %}
+          --max_SV_cnt 4000
+        when: enable_sv_ts is defined and enable_sv_ts|bool == true
+
+      - name: Set FIFO scheduling on SV timestamp logger process
+        shell:
+          PID=$(ps -eTo comm,pid |grep sv_timestamp_lo|cut -d' ' -f2)
+          chrt --fifo -p 1 $PID
+        when: enable_sv_ts is defined and enable_sv_ts|bool == true
+
+- name: Start test
+  become: true
+  hosts:
+    publisher
+  tasks:
+      - name: Send SV
+        command: chrt --fifo 1 taskset -c {{ bittwist_core }} bittwist -i {{ sv_interface }} {{ pcap_file }}.pcap -l {{ pcap_cycles }}
+
+- name: End test
+  become: true
+  hosts:
+    - publisher
+    - subscriber
+    - hypervisors
+  tasks:
+      - name: Stop SV timestamp logger
+        command:
+          docker stop sv_timestamp_logger
+        when: enable_sv_ts is defined and enable_sv_ts|bool == true
+
+      - name: Compute results
+        shell:
+          cmd: >-
+            docker logs sv_timestamp_logger > /tmp/sv_drops
+        when: enable_sv_ts is defined and enable_sv_ts|bool == true
+
+      - name: Fetch sv drop
+        synchronize:
+          src: /tmp/sv_drops
+          dest: ../tests_results/data/
+          mode: pull
+        when: enable_sv_ts is defined and enable_sv_ts|bool == true
+      - name: Remove SV timestamp logger
+        command:
+          docker rm sv_timestamp_logger
+        when: enable_sv_ts is defined and enable_sv_ts|bool == true
+
+      - name: Fetch SV timestamps
+        synchronize:
+          src: /tmp/ts_sv_{{ inventory_hostname }}
+          dest: ../tests_results/data/
+          mode: pull
+        when: enable_sv_ts is defined and enable_sv_ts|bool == true
+
+- name: Cleanup seapath-trace on hypervisor
+  become: true
+  hosts:
+    - hypervisors
+  tasks:
+      - name: End seapath-trace
+        command:
+            killall --wait "seapath-trace.py" --signal SIGINT
+        when: enable_bpftrace is defined and enable_bpftrace|bool == true
+      - name: Fetch seapath-trace result file
+        synchronize:
+          src: /tmp/results
+          dest: ../tests_results/latency/hyp_seapath_trace.record
+          mode: pull
+        when: enable_bpftrace is defined and enable_bpftrace|bool == true
+
+- name: Cleanup bpftrace on subscriber
+  become: true
+  hosts:
+    - subscriber
+  tasks:
+      - name: End seapath-trace
+        command:
+            killall --wait "seapath-trace.py" --signal SIGINT
+        when: enable_bpftrace is defined and enable_bpftrace|bool == true
+      - name: Fetch seapath-trace result file
+        synchronize:
+          src: /tmp/results
+          dest: ../tests_results/latency/sub_seapath_trace.record
+          mode: pull
+        when: enable_bpftrace is defined and enable_bpftrace|bool == true
+
+- name: Fetch logs
+  become: true
+  hosts:
+    - publisher
+    - hypervisors
+    - subscriber
+  tasks:
+      - name: Extract PTP logs
+        shell:
+          cmd: >-
+            journalctl -b -u {{ item }}.service > /tmp/{{ item }}_{{ inventory_hostname }}
+        with_items:
+          - ptp4l
+          - phc2sys
+        when: ptp_manual_configuration is defined and ptp_manual_configuration|bool == true
+      - name: Fetch PTP logs
+        synchronize:
+          src: /tmp/{{ item }}_{{ inventory_hostname }}
+          dest: ../tests_results/ptp/
+          mode: pull
+        with_items:
+          - ptp4l
+          - phc2sys
+        when: ptp_manual_configuration is defined and ptp_manual_configuration|bool == true
+- name: Compute results
+  hosts:
+    - localhost
+  vars_files:
+    - ../vars/threshold.yaml
+  tasks:
+    - name: Record end time of the test
+      shell:
+        cmd: >-
+          echo Test ended at $(echo `date +'%T'`) >> ../tests_results/time
+    - name: Set publisher host variable
+      set_fact:
+        publisher_name: "{{ hostvars[groups['publisher'][0]].inventory_hostname }}"
+        hypervisor_name: "{{ hostvars[groups['hypervisors'][0]].inventory_hostname }}"
+    - name: Generate latency report
+      command:
+        python3 ../files/scripts/generate_latency_report.py  \
+        -s ../tests_results/data/ts_sv_{{ hostvars[item].inventory_hostname }} \
+        -y ../tests_results/data/ts_sv_{{ hypervisor_name }} \
+        {% if publisher_name.enable_sv_ts is defined %}
+          -p ../tests_results/data/ts_sv_{{ publisher_name }} \
+        {% endif %}
+        -o ../tests_results \
+        --ttot {{ Ttot }}
+      with_items: "{{ groups['subscriber'] }}"
+    - name: Generate phc2sys plots
+      command:
+        python3 ../files/scripts/plot_ptp.py \
+        -i ../tests_results/ptp/phc2sys_{{ item }} \
+        -o ../tests_results
+      with_items: "{{ groups['all'] }}"
+      when: ptp_manual_configuration is defined and ptp_manual_configuration|bool == true
+    - name: Generate phc2sys plots
+      command:
+        python3 ../files/scripts/plot_ptp.py \
+        -i ../tests_results/ptp/ptp4l_{{ item }} \
+        -o ../tests_results
+      with_items:
+      - "{{ groups['publisher'] }}"
+      - "{{ groups['hypervisors'] }}"
+      when: ptp_manual_configuration is defined and ptp_manual_configuration|bool == true

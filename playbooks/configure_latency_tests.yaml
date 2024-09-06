@@ -1,0 +1,110 @@
+---
+- name: Prepare publisher and hypervisor
+  become: true
+  hosts:
+    - publisher
+    - hypervisors
+  tasks:
+      - name: Disable kernel adresses exposition restriction
+        shell:
+          cmd: >-
+            echo 0 > /proc/sys/kernel/kptr_restrict
+      - name: Send ptp4l configuration file
+        copy:
+          src: ../files/configuration/ptp4l.conf
+          dest: /etc/ptp4l.conf
+        notify:
+          Enable ptp4l.service
+        when: ptp_manual_configuration is defined and ptp_manual_configuration|bool == true
+      - name: Send ptp4l.service
+        template:
+          src: ../files/templates/ptp4l.service.j2
+          dest: /etc/systemd/system/ptp4l.service
+        notify:
+          Enable ptp4l.service
+        when: ptp_manual_configuration is defined and ptp_manual_configuration|bool == true
+      - name: Send phc2sys.service
+        template:
+          src: ../files/templates/phc2sys.service.j2
+          dest: /etc/systemd/system/phc2sys.service
+        notify:
+          Enable phc2sys.service
+        when: ptp_manual_configuration is defined and ptp_manual_configuration|bool == true
+      - name: Send phc2nic.service
+        template:
+          src: ../files/templates/phc2nic.service.j2
+          dest: /etc/systemd/system/phc2nic.service
+        notify:
+          Enable phc2nic.service
+        when: ptp_manual_configuration is defined and ptp_manual_configuration|bool == true
+  handlers:
+      - name: Enable ptp4l.service
+        ansible.builtin.systemd:
+          service: ptp4l.service
+          enabled: true
+          state: restarted
+          daemon_reload: true
+      - name: Enable phc2sys.service
+        ansible.builtin.systemd:
+          service: phc2sys.service
+          enabled: true
+          state: restarted
+          daemon_reload: true
+      - name: Enable phc2nic.service
+        ansible.builtin.systemd:
+          service: phc2nic.service
+          enabled: true
+          state: restarted
+          daemon_reload: true
+
+- name: Configure SV timestamp logger
+  become: true
+  hosts:
+    - publisher
+    - subscriber
+    - hypervisors
+  tasks:
+      - name: Send SV timestamp logger
+        copy:
+          src: ../files/docker/sv_timestamp_logger/sv_timestamp_logger.tar
+          dest: /tmp/sv_timestamp_logger.tar
+        when: enable_sv_ts is defined and enable_sv_ts|bool == true
+
+      - name: Load SV timestamp logger
+        command: docker image load -i /tmp/sv_timestamp_logger.tar
+        when: enable_sv_ts is defined and enable_sv_ts|bool == true
+
+- name: Configure seapath-trace
+  become: true
+  hosts:
+    - subscriber
+    - hypervisors
+  tasks:
+    - name: Send seapath-trace configuration file
+      template:
+          src: ../files/templates/seapath-trace.cfg.j2
+          dest: /etc/seapath-trace.cfg
+
+- name: Prepare vms
+  become: true
+  hosts:
+    - subscriber
+  tasks:
+      - name: Disable kernel adresses exposition restriction
+        shell:
+          cmd: >-
+            echo 0 > /proc/sys/kernel/kptr_restrict
+      - name: Send phc2sys.service
+        template:
+          src: ../files/templates/vms_phc2sys.service.j2
+          dest: /etc/systemd/system/phc2sys.service
+        notify:
+          - Enable phc2sys.service
+        when: ptp_manual_configuration is defined and ptp_manual_configuration|bool == true
+  handlers:
+      - name: Enable phc2sys.service
+        ansible.builtin.systemd:
+          service: phc2sys.service
+          enabled: true
+          state: restarted
+          daemon_reload: true

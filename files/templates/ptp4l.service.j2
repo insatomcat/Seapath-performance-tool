@@ -1,0 +1,11 @@
+[Unit]
+Description=Precision Time Protocol (PTP) service
+Documentation=man:ptp4l
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=chrt --fifo 1 taskset -c {{ ptp_core }} ptp4l -f /etc/ptp4l.conf -2 -i {{ ptp_interface }} -H -P
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,31 @@
+---
+all:
+    children:
+        standalone_machine:
+            children:
+                subscriber:
+                    hosts:
+                        vm_name: # Change as desired
+                            ansible_host:
+                            ansible_user:
+                            ansible_python_interpreter: /usr/bin/python3
+                            ansible_connection: ssh
+                            ansible_ssh_private_key_file:
+                            ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+                            ansible_remote_tmp: /tmp/.ansible/tmp
+
+                            # PTP configuration
+                            ptp_interface: # PTP interface
+                            ptp_device: # PTP device synchronized by ptp4l
+                            ptp_core:  # ptp4l CPU core
+                            phc_core:  # phc2sys CPU core
+
+                            sv_interface: # SV reception interface
+
+                            sv_ts_core:  # sv_timestamp_logger CPU core
+                            bpftrace_script: # BPFtrace script to be run
+                            ptp_manual_configuration: # Remove this var to disable ptp configuration
+                            enable_bpftrace: # Enable BPFtrace tracing
+                            bpftrace_core: # Core to run BPFtrace (should be isolated)
+                            first_SV: # First SV counter defined in PCAP file
+                            stream_to_log: # Desired SV stream to record. If not set, all streams are logged.
